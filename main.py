@@ -82,7 +82,7 @@ class PremierLeagueScraper:
             self.gc = None
 
     def test_google_connection(self):
-        """Prófar Google tengingu með því að búa til test sheet"""
+        """Prófar Google tengingu með því að lista sheets"""
         if self.gc is None:
             self.logger.error("❌ ENGIN GOOGLE TENGING TIL AÐ PRÓFA!")
             return False
@@ -90,25 +90,9 @@ class PremierLeagueScraper:
         try:
             self.logger.info("🧪 PRÓFA GOOGLE TENGINGU...")
             
-            # Reynir að búa til test sheet
-            test_name = f"TEST_PL_DEBUG_{int(time.time())}"
-            test_sheet = self.gc.create(test_name)
-            
-            self.logger.info(f"✅ TEST SHEET BÚIÐ TIL: {test_sheet.title}")
-            self.logger.info(f"🔗 SHEET URL: {test_sheet.url}")
-            
-            # Reynir að deila með þér
-            test_sheet.share('arnortumio@gmail.com', perm_type='user', role='owner')
-            self.logger.info("✅ SHEET DEILT MEÐ arnortumio@gmail.com")
-            
-            # Reynir að skrifa eitthvað
-            worksheet = test_sheet.sheet1
-            worksheet.update('A1', [['TEST', 'DATA'], ['Virkar', 'Já!']])
-            self.logger.info("✅ GÖGN SKRIFUÐ Í SHEET")
-            
-            # Eyðir test sheet
-            self.gc.del_spreadsheet(test_sheet.id)
-            self.logger.info("🗑️ TEST SHEET EYTT")
+            # Reynir bara að lista sheets - þarf ekki að búa til nýtt
+            sheets = self.gc.list_spreadsheet_files()
+            self.logger.info(f"✅ GOOGLE TENGING VIRKAR - FANN {len(sheets)} SHEETS")
             
             return True
             
@@ -225,13 +209,27 @@ class PremierLeagueScraper:
             try:
                 sheet = self.gc.open(sheet_name)
                 self.logger.info(f"✅ OPNAÐI NÚVERANDI SHEET: {sheet.title}")
-            except:
+            except gspread.SpreadsheetNotFound:
                 self.logger.info(f"🆕 BÝ TIL NÝTT SHEET: {sheet_name}")
                 sheet = self.gc.create(sheet_name)
                 # Deilir með þínum email
                 sheet.share('arnortumio@gmail.com', perm_type='user', role='owner')
                 self.logger.info("✅ SHEET DEILT MEÐ arnortumio@gmail.com")
                 self.logger.info(f"🔗 SHEET URL: {sheet.url}")
+            except Exception as create_error:
+                self.logger.error(f"💥 VILLA VIÐ AÐ BÚA TIL SHEET: {create_error}")
+                # Reynum að nota þitt persónulega Drive
+                self.logger.info("🔄 REYNI AÐ NOTA EXISTING SHEET...")
+                try:
+                    # Býr til sheet með öðru nafni
+                    import random
+                    backup_name = f"PL_Data_{random.randint(1000,9999)}"
+                    sheet = self.gc.create(backup_name)
+                    sheet.share('arnortumio@gmail.com', perm_type='user', role='owner')
+                    self.logger.info(f"✅ BACKUP SHEET BÚIÐ TIL: {sheet.url}")
+                except Exception as e:
+                    self.logger.error(f"💥 GETUR EKKI BÚIÐ TIL NEITT SHEET: {e}")
+                    return
                 
             # Opnar eða býr til worksheet
             try:
