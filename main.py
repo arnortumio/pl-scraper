@@ -234,6 +234,30 @@ class PremierLeagueScraper:
             schedule.run_pending()
             time.sleep(60)  # Athugar á mínútu fresti
 
+def run_web_server():
+    """Keyrir einfaldan web server fyrir Render"""
+    from http.server import HTTPServer, SimpleHTTPRequestHandler
+    import threading
+    
+    class Handler(SimpleHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header('Content-type', 'text/html')
+            self.end_headers()
+            self.wfile.write(b'<h1>PL Scraper is running!</h1><p>Check your Google Sheets for data.</p>')
+
+    port = int(os.environ.get('PORT', 8000))
+    server = HTTPServer(('0.0.0.0', port), Handler)
+    
+    def start_server():
+        print(f"Web server running on port {port}")
+        server.serve_forever()
+    
+    # Keyrir web server í background thread
+    thread = threading.Thread(target=start_server)
+    thread.daemon = True
+    thread.start()
+
 def main():
     """
     Aðalfall til að keyra scraper-inn
@@ -242,7 +266,8 @@ def main():
     
     # Athugar hvort þetta er production eða development
     if os.environ.get('RENDER') or os.environ.get('RAILWAY_ENVIRONMENT'):
-        # Production - keyrir scheduler
+        # Production - keyrir web server og scheduler
+        run_web_server()
         scraper.start_scheduler()
     else:
         # Development - keyrir bara einu sinni
