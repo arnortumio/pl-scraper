@@ -106,8 +106,15 @@ class PremierLeagueScraper:
             self.logger.info("🏴󠁧󠁢󠁥󠁮󠁧󠁿 SÆKI PREMIER LEAGUE TÖFLU...")
             
             url = f"{self.base_url}/en/comps/9/Premier-League-Stats"
-            response = requests.get(url, headers=self.headers)
+            
+            # Bíður aðeins og notar session
+            time.sleep(2)
+            response = self.session.get(url, timeout=30)
             self.logger.info(f"📡 HTTP Status: {response.status_code}")
+            
+            if response.status_code != 200:
+                self.logger.error(f"❌ BAD HTTP RESPONSE: {response.status_code}")
+                return None
             
             soup = BeautifulSoup(response.content, 'html.parser')
             
