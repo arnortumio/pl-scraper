@@ -118,6 +118,19 @@ class PremierLeagueScraper:
         self.logger.error("❌ Gat ekki fundið leikjatöflu.")
         return None
 
+    def clean_data_for_sheets(self, data_list):
+        """Skiptir út NaN í tóman streng fyrir Google Sheets."""
+        cleaned = []
+        for row in data_list:
+            new_row = []
+            for item in row:
+                if pd.isna(item):
+                    new_row.append("")
+                else:
+                    new_row.append(item)
+            cleaned.append(new_row)
+        return cleaned
+
     def update_google_sheet(self, sheet_name, data, worksheet_name):
         if self.gc is None:
             self.logger.error("❌ Engin Google Sheets tenging.")
@@ -127,22 +140,27 @@ class PremierLeagueScraper:
                 sheet = self.gc.open(sheet_name)
             except gspread.SpreadsheetNotFound:
                 sheet = self.gc.create(sheet_name)
+                # Breyttu netfangi hér ef þú vilt deila með öðrum
                 sheet.share('your-email@example.com', perm_type='user', role='writer')
 
             try:
                 worksheet = sheet.worksheet(worksheet_name)
                 worksheet.clear()
-            except:
+            except gspread.WorksheetNotFound:
                 worksheet = sheet.add_worksheet(title=worksheet_name, rows="1000", cols="30")
 
             if data is not None and not data.empty:
                 data_list = [data.columns.tolist()] + data.values.tolist()
-                worksheet.update('A1', data_list)
-                self.logger.info(f"✅ Uppfærði {worksheet_name} með {len(data)} röðum.")
+                cleaned_data = self.clean_data_for_sheets(data_list)
+                try:
+                    worksheet.update('A1', cleaned_data)
+                    self.logger.info(f"✅ Uppfærði {worksheet_name} með {len(data)} röðum.")
+                except Exception as e:
+                    self.logger.error(f"💥 Villa við uppfærslu á worksheet.update fyrir {worksheet_name}: {e}")
             else:
                 self.logger.warning(f"⚠️ Engin gögn til að uppfæra í {worksheet_name}.")
         except Exception as e:
-            self.logger.error(f"💥 Villa við uppfærslu á sheet: {e}")
+            self.logger.error(f"💥 Villa við að nálgast eða búa til sheet/worksheet: {e}")
 
     def full_update(self):
         self.logger.info("🚀 Byrja fulla uppfærslu...")
