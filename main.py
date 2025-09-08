@@ -2,6 +2,7 @@ import cloudscraper
 from bs4 import BeautifulSoup, Comment
 import pandas as pd
 import time
+import random
 import schedule
 from datetime import datetime
 import gspread
@@ -68,27 +69,39 @@ class PremierLeagueScraper:
     def get_stats_page_soup(self, force_refresh=False):
         """
         Sækir /en/comps/9/stats/Premier-League-Stats einu sinni og geymir í cache.
-        Notar einfalt exponential backoff ef 429 kemur.
+        Notar exponential backoff með jitter og virðir Retry-After haus á 429 svörum.
         """
         if self._stats_page_soup is not None and not force_refresh:
             return self._stats_page_soup
 
         url = f"{self.base_url}/en/comps/9/stats/Premier-League-Stats"
-        backoff = [0, 2, 4, 8]
         last_status = None
-        for wait in backoff:
-            if wait:
-                time.sleep(wait)
+        max_attempts = 5
+        base_backoff = 1
+
+        for attempt in range(max_attempts):
             resp = self.session.get(url, timeout=30)
             last_status = resp.status_code
             self.logger.info(f"📡 HTTP Status: {resp.status_code} @ {url}")
+
             if resp.status_code == 200:
                 self._stats_page_html = resp.text
                 self._stats_page_soup = BeautifulSoup(resp.text, 'html.parser')
                 return self._stats_page_soup
+
             if resp.status_code == 429:
-                self.logger.warning("⚠️ 429 frá FBref, reyni aftur...")
+                retry_after = resp.headers.get("Retry-After")
+                if retry_after is not None:
+                    try:
+                        wait = float(retry_after)
+                    except ValueError:
+                        wait = 0
+                else:
+                    wait = min(base_backoff * (2 ** attempt), 60) + random.uniform(0, 1)
+                self.logger.warning(f"⚠️ 429 frá FBref, bíð í {wait:.2f}s og reyni aftur...")
+                time.sleep(wait)
                 continue
+
             break
 
         self.logger.error(f"❌ Gat ekki sótt stats-síðuna. síðasti status: {last_status}")
