@@ -98,18 +98,25 @@ class PremierLeagueScraper:
         """
         Nær í <table> með gefnu div_id/table_id.
         - Ef soup er gefið: notum það (engin ný nettenging).
-        - Annars sækjum við url (eins og áður).
+        - Ef url vísar á stats-síðuna: notum cache (get_stats_page_soup).
+        - Annars sækjum við url beint.
         - Ef tafla er í HTML comment innan div, parse-um comment.
         """
         try:
             if soup is None:
-                if not url:
-                    return None
-                response = self.session.get(url, timeout=30)
-                self.logger.info(f"📡 HTTP Status: {response.status_code} @ {url}")
-                if response.status_code != 200:
-                    return None
-                soup = BeautifulSoup(response.text, 'html.parser')
+                stats_url = f"{self.base_url}/en/comps/9/stats/Premier-League-Stats"
+                if url == stats_url:
+                    soup = self.get_stats_page_soup()
+                    if soup is None:
+                        return None
+                else:
+                    if not url:
+                        return None
+                    response = self.session.get(url, timeout=30)
+                    self.logger.info(f"📡 HTTP Status: {response.status_code} @ {url}")
+                    if response.status_code != 200:
+                        return None
+                    soup = BeautifulSoup(response.text, 'html.parser')
 
             target = soup
             if div_id:
@@ -169,8 +176,11 @@ class PremierLeagueScraper:
 
     def get_player_stats(self):
         self.logger.info("⚽ Sæki leikmannastatistík...")
-        url = f"{self.base_url}/en/comps/9/stats/Premier-League-Stats"
-        table = self.get_html_table(url, div_id='all_stats_standard', table_id='stats_standard')
+        soup = self.get_stats_page_soup()
+        if soup is None:
+            self.logger.error("❌ Gat ekki sótt stats-síðuna.")
+            return None
+        table = self.get_html_table(div_id='all_stats_standard', table_id='stats_standard', soup=soup)
         if table:
             try:
                 df = pd.read_html(StringIO(str(table)))[0]
@@ -185,8 +195,11 @@ class PremierLeagueScraper:
 
     def get_squad_standard_stats(self):
         self.logger.info("👥 Sæki Squad Standard Stats (lið, For)...")
-        url = f"{self.base_url}/en/comps/9/stats/Premier-League-Stats"
-        table = self.get_html_table(url, div_id='all_stats_squads_standard_for', table_id='stats_squads_standard_for')
+        soup = self.get_stats_page_soup()
+        if soup is None:
+            self.logger.error("❌ Gat ekki sótt stats-síðuna.")
+            return None
+        table = self.get_html_table(div_id='all_stats_squads_standard_for', table_id='stats_squads_standard_for', soup=soup)
         if table:
             try:
                 df = pd.read_html(StringIO(str(table)))[0]
