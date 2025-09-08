@@ -21,6 +21,8 @@ class PremierLeagueScraper:
         }
         self.session = cloudscraper.create_scraper()
         self.session.headers.update(self.headers)
+        self._stats_page_html = None
+        self._stats_page_soup = None
         self.setup_logging()
         self.setup_google_sheets()
 
@@ -61,23 +63,69 @@ class PremierLeagueScraper:
             self.logger.error(f"💥 Villa við prófun: {e}")
             return False
 
-    def get_html_table(self, url, div_id=None, table_id=None):
+    # ---------- NET / HTML HJÁLPARAR ----------
+
+    def get_stats_page_soup(self, force_refresh=False):
+        """
+        Sækir /en/comps/9/stats/Premier-League-Stats einu sinni og geymir í cache.
+        Notar einfalt exponential backoff ef 429 kemur.
+        """
+        if self._stats_page_soup is not None and not force_refresh:
+            return self._stats_page_soup
+
+        url = f"{self.base_url}/en/comps/9/stats/Premier-League-Stats"
+        backoff = [0, 2, 4, 8]
+        last_status = None
+        for wait in backoff:
+            if wait:
+                time.sleep(wait)
+            resp = self.session.get(url, timeout=30)
+            last_status = resp.status_code
+            self.logger.info(f"📡 HTTP Status: {resp.status_code} @ {url}")
+            if resp.status_code == 200:
+                self._stats_page_html = resp.text
+                self._stats_page_soup = BeautifulSoup(resp.text, 'html.parser')
+                return self._stats_page_soup
+            if resp.status_code == 429:
+                self.logger.warning("⚠️ 429 frá FBref, reyni aftur...")
+                continue
+            break
+
+        self.logger.error(f"❌ Gat ekki sótt stats-síðuna. síðasti status: {last_status}")
+        return None
+
+    def get_html_table(self, url=None, div_id=None, table_id=None, soup=None):
+        """
+        Nær í <table> með gefnu div_id/table_id.
+        - Ef soup er gefið: notum það (engin ný nettenging).
+        - Annars sækjum við url (eins og áður).
+        - Ef tafla er í HTML comment innan div, parse-um comment.
+        """
         try:
-            response = self.session.get(url, timeout=30)
-            self.logger.info(f"📡 HTTP Status: {response.status_code} @ {url}")
-            if response.status_code != 200:
-                return None
-            soup = BeautifulSoup(response.text, 'html.parser')
-            # Margar FBref töflur eru inni í HTML athugasemdum -> náum þeim út ef til er
+            if soup is None:
+                if not url:
+                    return None
+                response = self.session.get(url, timeout=30)
+                self.logger.info(f"📡 HTTP Status: {response.status_code} @ {url}")
+                if response.status_code != 200:
+                    return None
+                soup = BeautifulSoup(response.text, 'html.parser')
+
+            target = soup
             if div_id:
                 div = soup.find('div', id=div_id)
-                comment = div.find(string=lambda text: isinstance(text, Comment)) if div else None
-                soup = BeautifulSoup(comment, 'html.parser') if comment else soup
-            table = soup.find('table', {'id': table_id}) if table_id else soup.find('table', {'class': 'stats_table'})
+                if not div:
+                    return None
+                comment = div.find(string=lambda text: isinstance(text, Comment))
+                target = BeautifulSoup(comment, 'html.parser') if comment else div
+
+            table = target.find('table', {'id': table_id}) if table_id else target.find('table', {'class': 'stats_table'})
             return table
         except Exception as e:
             self.logger.error(f"💥 Villa við að sækja töflu (div_id={div_id}, table_id={table_id}): {e}")
             return None
+
+    # ---------- DFRAME HJÁLPARAR ----------
 
     def _flatten_columns(self, df: pd.DataFrame) -> pd.DataFrame:
         if isinstance(df.columns, pd.MultiIndex):
@@ -90,7 +138,6 @@ class PremierLeagueScraper:
         return df
 
     def _clean_header_rows(self, df: pd.DataFrame) -> pd.DataFrame:
-        # fjarlægjum endurteknar hauslínur sem stundum slæðast inn
         for dup in ("Squad", "Team", "Rk"):
             if dup in df.columns:
                 df = df[df[dup] != dup]
@@ -102,13 +149,15 @@ class PremierLeagueScraper:
         df['Last_Updated'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         return df
 
+    # ---------- GÖGNASÖFNUN ----------
+
     def get_premier_league_table(self):
         self.logger.info("🏴 Sæki Premier League töflu...")
         url = f"{self.base_url}/en/comps/9/Premier-League-Stats"
         table = self.get_html_table(url, div_id='all_results2024-2025_9_overall')
         if table:
             try:
-                df = pd.read_html(str(table))[0]
+                df = pd.read_html(StringIO(str(table)))[0]
             except ValueError:
                 self.logger.error("❌ pd.read_html tókst ekki á PL töflu.")
                 return None
@@ -124,7 +173,7 @@ class PremierLeagueScraper:
         table = self.get_html_table(url, div_id='all_stats_standard', table_id='stats_standard')
         if table:
             try:
-                df = pd.read_html(str(table))[0]
+                df = pd.read_html(StringIO(str(table)))[0]
             except ValueError:
                 self.logger.error("❌ pd.read_html tókst ekki á player stats.")
                 return None
@@ -134,14 +183,13 @@ class PremierLeagueScraper:
         self.logger.error("❌ Gat ekki fundið leikmannatöflu.")
         return None
 
-    # ✅ Squad Standard Stats (liðastat - For)
     def get_squad_standard_stats(self):
         self.logger.info("👥 Sæki Squad Standard Stats (lið, For)...")
         url = f"{self.base_url}/en/comps/9/stats/Premier-League-Stats"
         table = self.get_html_table(url, div_id='all_stats_squads_standard_for', table_id='stats_squads_standard_for')
         if table:
             try:
-                df = pd.read_html(str(table))[0]
+                df = pd.read_html(StringIO(str(table)))[0]
             except ValueError:
                 self.logger.error("❌ pd.read_html tókst ekki á Squad Standard For.")
                 return None
@@ -151,34 +199,33 @@ class PremierLeagueScraper:
         self.logger.error("❌ Gat ekki fundið Squad Standard For.")
         return None
 
-    # ✅ ALMENN HJÁLPARAÐFERÐ: nær í hvaða Squad-töflu sem er, með fallback ID
-    def get_squad_table_generic(self, table_keys):
+    def get_squad_table_generic(self, id_candidates):
         """
-        table_keys: listi af mögulegum table_id strengjum (án 'all_'), t.d.:
-            ["stats_squads_shooting_for", "stats_squads_shooting_for_2"]
-        Skilar DataFrame eða None.
+        Reynir marga mögulega (div_id, table_id) para fyrir SÖMU töflu úr stats-síðunni (úr cache).
         """
-        url = f"{self.base_url}/en/comps/9/stats/Premier-League-Stats"
-        for key in table_keys:
-            div_id = f"all_{key}"
-            table_id = key
-            self.logger.info(f"🔎 Reyni að sækja {table_id}...")
-            table = self.get_html_table(url, div_id=div_id, table_id=table_id)
-            if table:
+        soup = self.get_stats_page_soup()
+        if soup is None:
+            return None
+
+        for div_id, table_id in id_candidates:
+            self.logger.info(f"🔎 Reyni (div_id={div_id}, table_id={table_id})...")
+            table = self.get_html_table(div_id=div_id, table_id=table_id, soup=soup)
+            if not table:
+                continue
+            try:
+                df = pd.read_html(StringIO(str(table)))[0]
+            except ValueError:
                 try:
-                    df = pd.read_html(str(table))[0]
-                except ValueError:
-                    # Ef bs4 flavor hjálpar
-                    try:
-                        df_list = pd.read_html(str(table), flavor='bs4')
-                        df = df_list[0] if df_list else None
-                    except Exception:
-                        df = None
-                if df is not None and not df.empty:
-                    df = self._finalize_df(df)
-                    self.logger.info(f"✅ Tókst: {table_id} ({len(df)} línur)")
-                    return df
-        self.logger.error(f"❌ Tókst ekki að ná í neitt af: {table_keys}")
+                    df_list = pd.read_html(StringIO(str(table)))
+                    df = df_list[0] if df_list else None
+                except Exception:
+                    df = None
+            if df is not None and not df.empty:
+                df = self._finalize_df(df)
+                self.logger.info(f"✅ Tókst: {table_id} ({len(df)} línur)")
+                return df
+
+        self.logger.error(f"❌ Tókst ekki að ná í töfluna eftir {len(id_candidates)} tilraunum.")
         return None
 
     def get_fixtures_and_results(self):
@@ -187,7 +234,7 @@ class PremierLeagueScraper:
         table = self.get_html_table(url, div_id='all_sched_ks_3232_1')
         if table:
             try:
-                df = pd.read_html(str(table))[0]
+                df = pd.read_html(StringIO(str(table)))[0]
             except ValueError:
                 self.logger.error("❌ pd.read_html tókst ekki á fixtures/results.")
                 return None
@@ -196,6 +243,8 @@ class PremierLeagueScraper:
             return df
         self.logger.error("❌ Gat ekki fundið leikjatöflu.")
         return None
+
+    # ---------- SHEETS ----------
 
     def clean_data_for_sheets(self, data_list):
         """Skiptir út NaN í tóman streng fyrir Google Sheets."""
@@ -232,7 +281,8 @@ class PremierLeagueScraper:
                 data_list = [data.columns.tolist()] + data.values.tolist()
                 cleaned_data = self.clean_data_for_sheets(data_list)
                 try:
-                    worksheet.update('A1', cleaned_data)
+                    # Nýja röðin: values fyrst, síðan range_name eða með nafngildum
+                    worksheet.update(values=cleaned_data, range_name='A1')
                     self.logger.info(f"✅ Uppfærði {worksheet_name} með {len(data)} röðum.")
                 except Exception as e:
                     self.logger.error(f"💥 Villa við uppfærslu á worksheet.update fyrir {worksheet_name}: {e}")
@@ -240,6 +290,8 @@ class PremierLeagueScraper:
                 self.logger.warning(f"⚠️ Engin gögn til að uppfæra í {worksheet_name}.")
         except Exception as e:
             self.logger.error(f"💥 Villa við að nálgast eða búa til sheet/worksheet: {e}")
+
+    # ---------- KEYRSLUR ----------
 
     def full_update(self):
         self.logger.info("🚀 Byrja fulla uppfærslu...")
@@ -249,59 +301,151 @@ class PremierLeagueScraper:
 
         sheet_name = "PL_Fantasy_Data"
 
-        # --- Heimsíður / leikmenn / leikir eins og áður ---
+        # Heimsíður / leikmenn / leikir eins og áður
         league = self.get_premier_league_table()
         players = self.get_player_stats()
         fixtures = self.get_fixtures_and_results()
         squads_std_for = self.get_squad_standard_stats()  # For
 
-        # --- ALLAR SQUAD TÖFLUR (For/Against) ---
+        # ALLAR SQUAD TÖFLUR (For/Against) með víðari fallback
         squad_tables = {
-            # Standard (við erum þegar með For, bætum við Against)
-            "Squad_Standard_Against": ["stats_squads_standard_against"],
-
-            # Shooting
-            "Squad_Shooting_For": ["stats_squads_shooting_for"],
-            "Squad_Shooting_Against": ["stats_squads_shooting_against"],
-
-            # Passing
-            "Squad_Passing_For": ["stats_squads_passing_for"],
-            "Squad_Passing_Against": ["stats_squads_passing_against"],
-
-            # Passing Types
-            "Squad_PassingTypes_For": ["stats_squads_passing_types_for"],
-            "Squad_PassingTypes_Against": ["stats_squads_passing_types_against"],
-
-            # Goal Creating Actions
-            "Squad_GCA_For": ["stats_squads_gca_for"],
-            "Squad_GCA_Against": ["stats_squads_gca_against"],
-
-            # Defense
-            "Squad_Defense_For": ["stats_squads_defense_for"],
-            "Squad_Defense_Against": ["stats_squads_defense_against"],
-
-            # Possession
-            "Squad_Possession_For": ["stats_squads_possession_for"],
-            "Squad_Possession_Against": ["stats_squads_possession_against"],
-
-            # Playing Time
-            "Squad_PlayingTime_For": ["stats_squads_playing_time_for"],
-            "Squad_PlayingTime_Against": ["stats_squads_playing_time_against"],
-
-            # Misc
-            "Squad_Misc_For": ["stats_squads_misc_for"],
-            "Squad_Misc_Against": ["stats_squads_misc_against"],
-
-            # Goalkeeping (sumir endapunktar nota 'keeper' vs 'keepers' -> prófum bæði)
-            "Squad_GK_For": ["stats_squads_keeper_for", "stats_squads_keepers_for"],
-            "Squad_GK_Against": ["stats_squads_keeper_against", "stats_squads_keepers_against"],
-
-            # Goalkeeping Advanced
-            "Squad_GKAdv_For": ["stats_squads_keeper_adv_for", "stats_squads_keepers_adv_for"],
-            "Squad_GKAdv_Against": ["stats_squads_keeper_adv_against", "stats_squads_keepers_adv_against"],
+            "Squad_Standard_Against": [
+                ("all_stats_squads_standard_against", "stats_squads_standard_against"),
+                ("all_squads_standard_against", "squads_standard_against"),
+                ("all_stats_squads_standard", "stats_squads_standard"),
+                ("all_squads_standard", "squads_standard"),
+            ],
+            "Squad_Shooting_For": [
+                ("all_stats_squads_shooting_for", "stats_squads_shooting_for"),
+                ("all_squads_shooting_for", "squads_shooting_for"),
+                ("all_stats_squads_shooting", "stats_squads_shooting"),
+                ("all_squads_shooting", "squads_shooting"),
+            ],
+            "Squad_Shooting_Against": [
+                ("all_stats_squads_shooting_against", "stats_squads_shooting_against"),
+                ("all_squads_shooting_against", "squads_shooting_against"),
+                ("all_stats_squads_shooting", "stats_squads_shooting"),
+                ("all_squads_shooting", "squads_shooting"),
+            ],
+            "Squad_Passing_For": [
+                ("all_stats_squads_passing_for", "stats_squads_passing_for"),
+                ("all_squads_passing_for", "squads_passing_for"),
+                ("all_stats_squads_passing", "stats_squads_passing"),
+                ("all_squads_passing", "squads_passing"),
+            ],
+            "Squad_Passing_Against": [
+                ("all_stats_squads_passing_against", "stats_squads_passing_against"),
+                ("all_squads_passing_against", "squads_passing_against"),
+                ("all_stats_squads_passing", "stats_squads_passing"),
+                ("all_squads_passing", "squads_passing"),
+            ],
+            "Squad_PassingTypes_For": [
+                ("all_stats_squads_passing_types_for", "stats_squads_passing_types_for"),
+                ("all_squads_passing_types_for", "squads_passing_types_for"),
+                ("all_stats_squads_passing_types", "stats_squads_passing_types"),
+                ("all_squads_passing_types", "squads_passing_types"),
+            ],
+            "Squad_PassingTypes_Against": [
+                ("all_stats_squads_passing_types_against", "stats_squads_passing_types_against"),
+                ("all_squads_passing_types_against", "squads_passing_types_against"),
+                ("all_stats_squads_passing_types", "stats_squads_passing_types"),
+                ("all_squads_passing_types", "squads_passing_types"),
+            ],
+            "Squad_GCA_For": [
+                ("all_stats_squads_gca_for", "stats_squads_gca_for"),
+                ("all_squads_gca_for", "squads_gca_for"),
+                ("all_stats_squads_gca", "stats_squads_gca"),
+                ("all_squads_gca", "squads_gca"),
+            ],
+            "Squad_GCA_Against": [
+                ("all_stats_squads_gca_against", "stats_squads_gca_against"),
+                ("all_squads_gca_against", "squads_gca_against"),
+                ("all_stats_squads_gca", "stats_squads_gca"),
+                ("all_squads_gca", "squads_gca"),
+            ],
+            "Squad_Defense_For": [
+                ("all_stats_squads_defense_for", "stats_squads_defense_for"),
+                ("all_squads_defense_for", "squads_defense_for"),
+                ("all_stats_squads_defense", "stats_squads_defense"),
+                ("all_squads_defense", "squads_defense"),
+            ],
+            "Squad_Defense_Against": [
+                ("all_stats_squads_defense_against", "stats_squads_defense_against"),
+                ("all_squads_defense_against", "squads_defense_against"),
+                ("all_stats_squads_defense", "stats_squads_defense"),
+                ("all_squads_defense", "squads_defense"),
+            ],
+            "Squad_Possession_For": [
+                ("all_stats_squads_possession_for", "stats_squads_possession_for"),
+                ("all_squads_possession_for", "squads_possession_for"),
+                ("all_stats_squads_possession", "stats_squads_possession"),
+                ("all_squads_possession", "squads_possession"),
+            ],
+            "Squad_Possession_Against": [
+                ("all_stats_squads_possession_against", "stats_squads_possession_against"),
+                ("all_squads_possession_against", "squads_possession_against"),
+                ("all_stats_squads_possession", "stats_squads_possession"),
+                ("all_squads_possession", "squads_possession"),
+            ],
+            "Squad_PlayingTime_For": [
+                ("all_stats_squads_playing_time_for", "stats_squads_playing_time_for"),
+                ("all_squads_playing_time_for", "squads_playing_time_for"),
+                ("all_stats_squads_playing_time", "stats_squads_playing_time"),
+                ("all_squads_playing_time", "squads_playing_time"),
+            ],
+            "Squad_PlayingTime_Against": [
+                ("all_stats_squads_playing_time_against", "stats_squads_playing_time_against"),
+                ("all_squads_playing_time_against", "squads_playing_time_against"),
+                ("all_stats_squads_playing_time", "stats_squads_playing_time"),
+                ("all_squads_playing_time", "squads_playing_time"),
+            ],
+            "Squad_Misc_For": [
+                ("all_stats_squads_misc_for", "stats_squads_misc_for"),
+                ("all_squads_misc_for", "squads_misc_for"),
+                ("all_stats_squads_misc", "stats_squads_misc"),
+                ("all_squads_misc", "squads_misc"),
+            ],
+            "Squad_Misc_Against": [
+                ("all_stats_squads_misc_against", "stats_squads_misc_against"),
+                ("all_squads_misc_against", "squads_misc_against"),
+                ("all_stats_squads_misc", "stats_squads_misc"),
+                ("all_squads_misc", "squads_misc"),
+            ],
+            "Squad_GK_For": [
+                ("all_stats_squads_keeper_for", "stats_squads_keeper_for"),
+                ("all_stats_squads_keepers_for", "stats_squads_keepers_for"),
+                ("all_squads_keeper_for", "squads_keeper_for"),
+                ("all_squads_keepers_for", "squads_keepers_for"),
+                ("all_stats_squads_keeper", "stats_squads_keeper"),
+                ("all_squads_keeper", "squads_keeper"),
+            ],
+            "Squad_GK_Against": [
+                ("all_stats_squads_keeper_against", "stats_squads_keeper_against"),
+                ("all_stats_squads_keepers_against", "stats_squads_keepers_against"),
+                ("all_squads_keeper_against", "squads_keeper_against"),
+                ("all_squads_keepers_against", "squads_keepers_against"),
+                ("all_stats_squads_keeper", "stats_squads_keeper"),
+                ("all_squads_keeper", "squads_keeper"),
+            ],
+            "Squad_GKAdv_For": [
+                ("all_stats_squads_keeper_adv_for", "stats_squads_keeper_adv_for"),
+                ("all_stats_squads_keepers_adv_for", "stats_squads_keepers_adv_for"),
+                ("all_squads_keeper_adv_for", "squads_keeper_adv_for"),
+                ("all_squads_keepers_adv_for", "squads_keepers_adv_for"),
+                ("all_stats_squads_keeper_adv", "stats_squads_keeper_adv"),
+                ("all_squads_keeper_adv", "squads_keeper_adv"),
+            ],
+            "Squad_GKAdv_Against": [
+                ("all_stats_squads_keeper_adv_against", "stats_squads_keeper_adv_against"),
+                ("all_stats_squads_keepers_adv_against", "stats_squads_keepers_adv_against"),
+                ("all_squads_keeper_adv_against", "squads_keeper_adv_against"),
+                ("all_squads_keepers_adv_against", "squads_keepers_adv_against"),
+                ("all_stats_squads_keeper_adv", "stats_squads_keeper_adv"),
+                ("all_squads_keeper_adv", "squads_keeper_adv"),
+            ],
         }
 
-        # --- Ýtum á Sheets ---
+        # Ýtum á Sheets
         if league is not None:
             self.update_google_sheet(sheet_name, league, "League_Table")
         if players is not None:
@@ -311,9 +455,9 @@ class PremierLeagueScraper:
         if squads_std_for is not None:
             self.update_google_sheet(sheet_name, squads_std_for, "Squad_Standard_For")
 
-        # Sækjum restina af squad-töflunum
-        for worksheet_name, table_keys in squad_tables.items():
-            df = self.get_squad_table_generic(table_keys)
+        # Rest af squad töflum (úr cachaðri stats-síðu)
+        for worksheet_name, id_candidates in squad_tables.items():
+            df = self.get_squad_table_generic(id_candidates)
             if df is not None:
                 self.update_google_sheet(sheet_name, df, worksheet_name)
 
@@ -330,6 +474,8 @@ class PremierLeagueScraper:
         while True:
             schedule.run_pending()
             time.sleep(60)
+
+# ---------- LÍTILL VEFÞJÓNN TIL STATUS ----------
 
 def run_web_server():
     class Handler(SimpleHTTPRequestHandler):
