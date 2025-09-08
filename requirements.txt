@@ -3,9 +3,8 @@ beautifulsoup4
 pandas
 schedule
 gspread
+google-auth
+google-auth-oauthlib
 lxml
 html5lib
 cloudscraper
-google-auth
-
-
