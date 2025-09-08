@@ -299,6 +299,14 @@ class PremierLeagueScraper:
             self.logger.error("❌ Engin virk Google tenging.")
             return
 
+        # Try to fetch and cache the main stats page once. If this fails,
+        # there's no point in continuing with the update since many
+        # subsequent functions rely on these data. Avoid multiple failing
+        # requests by exiting early.
+        if self.get_stats_page_soup() is None:
+            self.logger.error("❌ Stats-síða ekki tiltæk. Hætti við uppfærslu.")
+            return
+
         sheet_name = "PL_Fantasy_Data"
 
         # Heimsíður / leikmenn / leikir eins og áður
