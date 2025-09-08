@@ -114,7 +114,8 @@ class PremierLeagueScraper:
         - Ef soup er gefið: notum það (engin ný nettenging).
         - Ef url vísar á stats-síðuna: notum cache (get_stats_page_soup).
         - Annars sækjum við url beint.
-        - Ef tafla er í HTML comment innan div, parse-um comment.
+        - Ef tafla er í HTML comment innan div eða á heildarsíðunni, parse-um comment.
+        - table_id má vera strengur eða regex mynstur.
         """
         try:
             if soup is None:
@@ -140,7 +141,15 @@ class PremierLeagueScraper:
                 comment = div.find(string=lambda text: isinstance(text, Comment))
                 target = BeautifulSoup(comment, 'html.parser') if comment else div
 
-            table = target.find('table', {'id': table_id}) if table_id else target.find('table', {'class': 'stats_table'})
+            table = target.find('table', id=table_id) if table_id else target.find('table', {'class': 'stats_table'})
+
+            if not table and table_id is not None and not div_id:
+                for comment_block in soup.find_all(string=lambda text: isinstance(text, Comment)):
+                    comment_soup = BeautifulSoup(comment_block, 'html.parser')
+                    table = comment_soup.find('table', id=table_id)
+                    if table:
+                        break
+
             return table
         except Exception as e:
             self.logger.error(f"💥 Villa við að sækja töflu (div_id={div_id}, table_id={table_id}): {e}")
@@ -174,18 +183,11 @@ class PremierLeagueScraper:
 
     def get_premier_league_table(self):
         self.logger.info("🏴 Sæki Premier League töflu...")
-        url = f"{self.base_url}/en/comps/9/Premier-League-Stats"
-        response = self.session.get(url, timeout=30)
-        self.logger.info(f"📡 HTTP Status: {response.status_code} @ {url}")
-        if response.status_code != 200:
-            self.logger.error("❌ Gat ekki sótt PL töflu síðu.")
+        soup = self.get_stats_page_soup()
+        if soup is None:
+            self.logger.error("❌ Gat ekki sótt stats-síðuna.")
             return None
-        soup = BeautifulSoup(response.text, 'html.parser')
-        div = soup.find('div', id=re.compile(r'^all_results'))
-        if not div:
-            self.logger.error("❌ Gat ekki fundið div fyrir PL töflu.")
-            return None
-        table = self.get_html_table(div_id=div.get('id'), soup=soup)
+        table = self.get_html_table(table_id=re.compile(r'^results'), soup=soup)
         if not table:
             self.logger.error("❌ Gat ekki fundið PL töflu.")
             return None
@@ -259,11 +261,7 @@ class PremierLeagueScraper:
             self.logger.error("❌ Gat ekki sótt leikjadagskrá.")
             return None
         soup = BeautifulSoup(response.text, 'html.parser')
-        div = soup.find('div', id=re.compile(r'^all_sched'))
-        if not div:
-            self.logger.error("❌ Gat ekki fundið div fyrir leikjatöflu.")
-            return None
-        table = self.get_html_table(div_id=div.get('id'), soup=soup)
+        table = self.get_html_table(table_id=re.compile(r'^sched'), soup=soup)
         if not table:
             self.logger.error("❌ Gat ekki fundið leikjatöflu.")
             return None
