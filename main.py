@@ -1,4 +1,3 @@
-
 import cloudscraper
 from bs4 import BeautifulSoup, Comment
 import pandas as pd
@@ -62,10 +61,11 @@ class PremierLeagueScraper:
             self.logger.error(f"💥 Villa við prófun: {e}")
             return False
 
+    # --------------------------- FBref hjálparföll --------------------------- #
     def get_html_table(self, url, div_id=None, table_id=None):
         try:
             response = self.session.get(url, timeout=30)
-            self.logger.info(f"📡 HTTP Status: {response.status_code}")
+            self.logger.info(f"📡 HTTP Status: {response.status_code} ({url})")
             if response.status_code != 200:
                 return None
             soup = BeautifulSoup(response.text, 'html.parser')
@@ -94,7 +94,7 @@ class PremierLeagueScraper:
         return None
 
     def get_player_stats(self):
-        self.logger.info("⚽ Sæki leikmannastatistík...")
+        self.logger.info("⚽ Sæki leikmannastatistík (FBref)...")
         url = f"{self.base_url}/en/comps/9/stats/Premier-League-Stats"
         table = self.get_html_table(url, div_id='all_stats_standard', table_id='stats_standard')
         if table:
@@ -102,23 +102,105 @@ class PremierLeagueScraper:
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = ['_'.join(col).strip() for col in df.columns.values]
             df['Last_Updated'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            self.logger.info(f"✅ Leikmenn fundnir: {len(df)}")
+            self.logger.info(f"✅ Leikmenn fundnir (FBref): {len(df)}")
             return df
-        self.logger.error("❌ Gat ekki fundið leikmannatöflu.")
+        self.logger.error("❌ Gat ekki fundið leikmannatöflu (FBref).")
         return None
 
     def get_fixtures_and_results(self):
-        self.logger.info("📅 Sæki leikjaupplýsingar...")
+        self.logger.info("📅 Sæki leikjaupplýsingar (FBref)...")
         url = f"{self.base_url}/en/comps/9/schedule/Premier-League-Fixtures"
         table = self.get_html_table(url, div_id='all_sched_ks_3232_1')
         if table:
             df = pd.read_html(str(table))[0]
             df['Last_Updated'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            self.logger.info(f"✅ Leikir fundnir: {len(df)}")
+            self.logger.info(f"✅ Leikir fundnir (FBref): {len(df)}")
             return df
-        self.logger.error("❌ Gat ekki fundið leikjatöflu.")
+        self.logger.error("❌ Gat ekki fundið leikjatöflu (FBref).")
         return None
 
+    # --------------------------- FPL hjálparföll ---------------------------- #
+    def _json_get(self, url: str):
+        """Örugg JSON beiðni með skýrri villumeðhöndlun."""
+        try:
+            r = self.session.get(url, timeout=30)
+            self.logger.info(f"📡 HTTP Status: {r.status_code} ({url})")
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            self.logger.error(f"💥 Villa við JSON beiðni á {url}: {e}")
+            return None
+
+    def get_fpl_data(self):
+        """
+        Sækir *öll* almenn FPL gögn (án innskráningar) og skilar sem dict af DataFrame-um.
+        Notar:
+          - https://fantasy.premierleague.com/api/bootstrap-static/
+          - https://fantasy.premierleague.com/api/fixtures/
+        """
+        self.logger.info("🧩 Sæki FPL gögn (bootstrap-static, fixtures)...")
+
+        bootstrap_url = "https://fantasy.premierleague.com/api/bootstrap-static/"
+        fixtures_url = "https://fantasy.premierleague.com/api/fixtures/"
+
+        data = self._json_get(bootstrap_url)
+        fixtures = self._json_get(fixtures_url)
+
+        if data is None:
+            self.logger.error("❌ Engin FPL bootstrap gögn fengust.")
+            return {}
+
+        dfs = {}
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        def dfize(obj, name):
+            try:
+                df = pd.json_normalize(obj)
+                df['Last_Updated'] = timestamp
+                dfs[name] = df
+                self.logger.info(f"✅ FPL {name}: {len(df)} raðir")
+            except Exception as e:
+                self.logger.error(f"💥 Gat ekki umbreytt {name} í DataFrame: {e}")
+
+        # Helstu listar í bootstrap-static
+        for key in [
+            'events',            # Umferðir (Gameweeks)
+            'teams',             # FPL-lið (mapping við PL-lið)
+            'elements',          # Leikmenn með FPL-eiginleikum
+            'element_types',     # Stöðurnar (GK/DEF/MID/FWD)
+            'phases',            # Fasalýsingar (t.d. pre-season/season)
+            'game_settings'      # Stillingar (einn hlut, ekki listi)
+        ]:
+            val = data.get(key)
+            if val is None:
+                self.logger.warning(f"⚠️ '{key}' fannst ekki í FPL-gögnum.")
+                continue
+            if isinstance(val, list):
+                dfize(val, f"FPL_{key.capitalize()}")
+            else:
+                # Eitt JSON-obj — setjum sem DataFrame með einni línu
+                dfize([val], f"FPL_{key.capitalize()}")
+
+        # Heildarfjöldi leikmanna í leiknum
+        total_players = data.get('total_players')
+        if total_players is not None:
+            df_total = pd.DataFrame([{'total_players': total_players, 'Last_Updated': timestamp}])
+            dfs['FPL_Total_Players'] = df_total
+            self.logger.info("✅ FPL Total_Players bætt við")
+
+        # Fixtures (allir leikir með FPL-ID, finished o.fl.)
+        if fixtures is not None:
+            try:
+                df_fixt = pd.json_normalize(fixtures)
+                df_fixt['Last_Updated'] = timestamp
+                dfs['FPL_Fixtures_API'] = df_fixt
+                self.logger.info(f"✅ FPL Fixtures: {len(df_fixt)} raðir")
+            except Exception as e:
+                self.logger.error(f"💥 Gat ekki umbreytt fixtures í DataFrame: {e}")
+
+        return dfs
+
+    # --------------------------- Sheets hjálparföll ------------------------- #
     def clean_data_for_sheets(self, data_list):
         """Skiptir út NaN í tóman streng fyrir Google Sheets."""
         cleaned = []
@@ -148,14 +230,22 @@ class PremierLeagueScraper:
                 worksheet = sheet.worksheet(worksheet_name)
                 worksheet.clear()
             except gspread.WorksheetNotFound:
-                worksheet = sheet.add_worksheet(title=worksheet_name, rows="1000", cols="30")
+                # vel stórt default pláss
+                worksheet = sheet.add_worksheet(title=worksheet_name, rows="5000", cols="200")
 
             if data is not None and not data.empty:
-                data_list = [data.columns.tolist()] + data.values.tolist()
+                # Tryggja að dálkheit séu strengir og unique
+                cols = [str(c) for c in data.columns.tolist()]
+                # Sumir JSON-reitir geta verið list/dict — varpa í streng fyrir Sheets
+                df = data.copy()
+                for c in df.columns:
+                    df[c] = df[c].apply(lambda x: json.dumps(x, ensure_ascii=False) if isinstance(x, (list, dict)) else x)
+
+                data_list = [cols] + df.values.tolist()
                 cleaned_data = self.clean_data_for_sheets(data_list)
                 try:
                     worksheet.update('A1', cleaned_data)
-                    self.logger.info(f"✅ Uppfærði {worksheet_name} með {len(data)} röðum.")
+                    self.logger.info(f"✅ Uppfærði {worksheet_name} með {len(df)} röðum.")
                 except Exception as e:
                     self.logger.error(f"💥 Villa við uppfærslu á worksheet.update fyrir {worksheet_name}: {e}")
             else:
@@ -163,6 +253,7 @@ class PremierLeagueScraper:
         except Exception as e:
             self.logger.error(f"💥 Villa við að nálgast eða búa til sheet/worksheet: {e}")
 
+    # --------------------------- Keyrsluföll ------------------------------- #
     def full_update(self):
         self.logger.info("🚀 Byrja fulla uppfærslu...")
         if not self.test_google_connection():
@@ -170,6 +261,8 @@ class PremierLeagueScraper:
             return
 
         sheet_name = "PL_Fantasy_Data"
+
+        # FBref
         league = self.get_premier_league_table()
         players = self.get_player_stats()
         fixtures = self.get_fixtures_and_results()
@@ -180,6 +273,11 @@ class PremierLeagueScraper:
             self.update_google_sheet(sheet_name, players, "Player_Stats")
         if fixtures is not None:
             self.update_google_sheet(sheet_name, fixtures, "Fixtures_Results")
+
+        # FPL (nýtt!)
+        fpl_dfs = self.get_fpl_data()
+        for ws_name, df in fpl_dfs.items():
+            self.update_google_sheet(sheet_name, df, ws_name)
 
         self.logger.info("✅ Full uppfærsla lokið!")
 
@@ -195,6 +293,7 @@ class PremierLeagueScraper:
             schedule.run_pending()
             time.sleep(60)
 
+# --------------------------- Einfaldur vefþjónn ---------------------------- #
 def run_web_server():
     class Handler(SimpleHTTPRequestHandler):
         def do_GET(self):
@@ -219,6 +318,7 @@ def run_web_server():
     thread.start()
     print(f"🌐 Web server keyrir á port {port}")
 
+# --------------------------- main ----------------------------------------- #
 def main():
     print("🚀 Ræsi Premier League Scraper...")
     scraper = PremierLeagueScraper()
